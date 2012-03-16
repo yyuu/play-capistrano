@@ -47,7 +47,11 @@ after 'deploy:setup', 'play:setup'
 after 'deploy:finalize_update', 'play:update'
 
 namespace :play do
-  _cset :play_version, '1.2.4'
+# _cset :play_version, '1.2.4'
+  _cset :play_version, '2.0'
+  _cset :play_major_version do
+    play_version.scan(/\d+/).first.to_i
+  end
   _cset :play_zip_url do
     "http://download.playframework.org/releases/#{File.basename(play_zip_file)}"
   end
@@ -93,6 +97,52 @@ namespace :play do
       play_bin_local
     end
   end
+  _cset :play_project_path do
+    release_path
+  end
+  _cset :play_project_path_local do
+    File.expand_path('.')
+  end
+  _cset :play_target_path do
+    if play_major_version < 2
+      File.join(play_project_path, 'precompiled')
+    else
+      File.join(play_project_path, 'target')
+    end
+  end
+  _cset :play_target_path_local do
+    if play_major_version < 2
+      File.join(play_project_path_local, 'precompiled')
+    else
+      File.join(play_project_path_local, 'target')
+    end
+  end
+  _cset :play_dependencies_path_map do
+    if play_major_version < 2
+      {
+        File.join(play_project_path, 'lib')     => File.join(play_project_path_local, 'lib'),
+        File.join(play_project_path, 'modules') => File.join(play_project_path_local, 'modules'),
+      }
+    else
+      {
+        play_target_path => play_target_path_local,
+      }
+    end
+  end
+  _cset :play_subcmd_dependencies do
+    if play_major_version < 2
+      "dependencies --forProd --sync"
+    else
+      "dependencies"
+    end
+  end
+  _cset :play_subcmd_precompile do
+    if play_major_version < 2
+      "precompile"
+    else
+      "compile"
+    end
+  end
   _cset :play_precompile_locally, false # perform precompilation on localhost
 
   namespace :setup do
@@ -134,7 +184,7 @@ namespace :play do
     task :setup_ivy_locally, :except => { :no_release => true } do
       template = File.read(play_ivy_settings_template)
       result = ERB.new(template).result(binding)
-      logger.info(run_locally(<<-E))
+      run_locally(<<-E)
         ( test -d #{File.dirname(play_ivy_settings_local)} || mkdir -p #{File.dirname(play_ivy_settings_local)} ) &&
         ( test -f #{play_ivy_settings_local} && mv -f #{play_ivy_settings_local} #{play_ivy_settings_local}.orig; true );
       E
@@ -159,7 +209,6 @@ namespace :play do
           ( test -d #{play_path} || ( unzip -q #{play_zip_file} -d #{File.dirname(temp_dir)} && #{try_sudo} mv -f #{temp_dir} #{play_path}; true ) ) &&
           test -x #{play_bin};
         fi;
-        #{play_cmd} version;
       E
       run "#{try_sudo} rm -f #{play_zip_file}" unless play_preserve_zip
     end
@@ -167,17 +216,16 @@ namespace :play do
     task :install_play_locally, :except => { :no_release => true } do # TODO: make install_play and install_play_locally together
       on_rollback {
         files = [ play_path_local, play_zip_file_local ]
-        logger.info(run_locally("rm -rf #{files.join(' ')}"))
+        run_locally("rm -rf #{files.join(' ')}")
       }
       dirs = [ File.dirname(play_zip_file_local), File.dirname(play_path_local) ].uniq()
-      logger.info(run_locally(<<-E))
+      run_locally(<<-E)
         if ! test -x #{play_bin_local}; then
           mkdir -p #{dirs.join(' ')} &&
           ( test -f #{play_zip_file_local} || ( wget --no-verbose -O #{play_zip_file_local} #{play_zip_url} ) ) &&
           ( test -d #{play_path_local} || unzip -q #{play_zip_file_local} -d #{File.dirname(play_path_local)} ) &&
           test -x #{play_bin_local};
         fi;
-        #{play_cmd_local} version;
       E
     end
   end
@@ -197,11 +245,11 @@ namespace :play do
       task :start, :roles => :app, :except => { :no_release => true } do
         run "rm -f #{play_pid_file}" # FIXME: should check if the pid is active
         play_start_options << "-Dprecompiled=true" if play_use_precompile
-        run "cd #{release_path} && nohup #{play_cmd} start --pid_file=#{play_pid_file} #{play_start_options.join(' ')}"
+        run "cd #{play_project_path} && nohup #{play_cmd} start --pid_file=#{play_pid_file} #{play_start_options.join(' ')}"
       end
 
       task :stop, :roles => :app, :except => { :no_release => true } do
-        run "cd #{release_path} && #{play_cmd} stop --pid_file=#{play_pid_file}"
+        run "cd #{play_project_path} && #{play_cmd} stop --pid_file=#{play_pid_file}"
       end
 
       task :restart, :roles => :app, :except => { :no_release => true } do
@@ -210,7 +258,7 @@ namespace :play do
       end
 
       task :status, :roles => :app, :except => { :no_release => true } do
-        run "cd #{release_path} && #{play_cmd} status --pid_file=#{play_pid_file}"
+        run "cd #{play_project_path} && #{play_cmd} status --pid_file=#{play_pid_file}"
       end	
     end
 
@@ -264,8 +312,10 @@ namespace :play do
 
   desc "update play runtime environment"
   task :update, :roles => :app, :except => { :no_release => true } do
-    # FIXME: made tmp/ group writable since deploy:finalize_update creates non-group-writable tmp/
-    run "#{try_sudo} chmod g+w #{release_path}/tmp" if fetch(:group_writable, true)
+    if play_major_version < 2
+      # FIXME: made tmp/ group writable since deploy:finalize_update creates non-group-writable tmp/
+      run "#{try_sudo} chmod g+w #{play_project_path}/tmp" if fetch(:group_writable, true)
+    end
 
     transaction {
       if play_use_precompile
@@ -285,35 +335,35 @@ namespace :play do
   end
 
   task :dependencies, :roles => :app, :except => { :no_release => true } do
-    run "cd #{release_path} && #{play_cmd} dependencies --forProd --sync"
+    run "cd #{play_project_path} && #{play_cmd} #{play_subcmd_dependencies}"
   end
 
   task :dependencies_locally, :roles => :app, :except => { :no_release => true } do
-    logger.info(run_locally("#{play_cmd_local} dependencies --forProd --sync"))
-    run "mkdir -p #{release_path}/lib #{release_path}/modules"
+    abort("execution failure") unless system("cd #{play_project_path_local} && #{play_cmd_local} #{play_subcmd_dependencies}")
+    run "mkdir -p #{play_dependencies_path_map.keys.join(' ')}"
     find_servers_for_task(current_task).each { |server|
-      logger.info(run_locally(<<-E))
-        rsync -lrt --chmod=u+rwX,go+rX ./lib/ #{user}@#{server.host}:#{release_path}/lib/ &&
-        rsync -lrt --chmod=u+rwX,go+rX ./modules/ #{user}@#{server.host}:#{release_path}/modules/;
-      E
+      cmds = play_dependencies_path_map.map { |dst, src|
+        "rsync -lrt --chmod=u+rwX,go+rX #{src}/ #{user}@#{server.host}:#{dst}/"
+      }
+      run_locally(cmds.join(' && '))
     }
-    run "chmod -R g+w #{release_path}/lib #{release_path}/modules" if fetch(:group_writable, true)
+    run "chmod -R g+w #{play_dependencies_path_map.keys.join(' ')}" if fetch(:group_writable, true)
   end
 
   task :precompile, :roles => :app, :except => { :no_release => true } do
-    run "cd #{release_path} && #{play_cmd} precompile"
+    run "cd #{play_project_path} && #{play_cmd} #{play_subcmd_precompile}"
   end
 
   task :precompile_locally, :roles => :app, :except => { :no_release => true } do
     on_rollback {
-      logger.info(run_locally("#{play_cmd_local} clean"))
+      run_locally("cd #{play_project_path_local} && #{play_cmd_local} clean")
     }
-    logger.info(run_locally("#{play_cmd_local} precompile"))
-    run "mkdir -p #{release_path}/precompiled"
+    abort("execution failure") unless system("cd #{play_project_path_local} && #{play_cmd_local} #{play_subcmd_precompile}")
+    run "mkdir -p #{play_target_path}"
     find_servers_for_task(current_task).each { |server|
-      logger.info(run_locally("rsync -lrt --chmod=u+rwX,go+rX ./precompiled/ #{user}@#{server.host}:#{release_path}/precompiled/"))
+      run_locally("rsync -lrt --chmod=u+rwX,go+rX #{play_target_path_local}/ #{user}@#{server.host}:#{play_target_path}/")
     }
-    run "chmod -R g+w #{release_path}/precompiled" if fetch(:group_writable, true)
+    run "chmod -R g+w #{play_target_path}" if fetch(:group_writable, true)
   end
 
   desc "start play service"
@@ -338,12 +388,12 @@ namespace :play do
 
   desc "view play pid"
   task :pid, :roles => :app, :except => { :no_release => true } do
-    run "cd #{current_path} && #{play_cmd} pid --pid_file=#{play_pid_file}"
+    run "cd #{play_project_path} && #{play_cmd} pid --pid_file=#{play_pid_file}"
   end
 
   desc "view play version"
   task :version, :roles => :app, :except => { :no_release => true } do
-    run "cd #{current_path} && #{play_cmd} version --pid_file=#{play_pid_file}"
+    run "cd #{play_project_path} && #{play_cmd} version --pid_file=#{play_pid_file}"
   end	
 
   desc "view running play apps"
