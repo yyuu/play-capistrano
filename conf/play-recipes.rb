@@ -145,89 +145,91 @@ namespace :play do
   end
   _cset :play_precompile_locally, false # perform precompilation on localhost
 
-  namespace :setup do
-    desc "install play if needed"
-    task :default, :except => { :no_release => true } do
-      transaction {
-        setup_ivy if fetch(:play_setup_ivy, false)
-        install_play
-        if play_precompile_locally
-          setup_ivy_locally if fetch(:play_setup_ivy_locally, false)
-          install_play_locally
-        end
-      }
-      transaction {
-        play_daemon.setup
-      }
-    end
+  desc "install play if needed"
+  task :setup do
+    transaction {
+      setup_ivy if fetch(:play_setup_ivy, false)
+      install
+      setup_locally if play_precompile_locally
+    }
+    transaction {
+      play_daemon.setup
+    }
+  end
 
-    _cset :play_ivy_settings_template, File.join(File.dirname(__FILE__), 'templates', 'ivysettings.erb')
-    _cset :play_ivy_settings do
-      File.join(capture('echo $HOME').chomp, '.ivy2', 'ivysettings.xml')
-    end
-    task :setup_ivy, :roles => :app, :except => { :no_release => true } do
-      tempfile = File.join('/tmp', File.basename(play_ivy_settings))
-      on_rollback {
-        run "rm -f #{tempfile}"
-      }
-      template = File.read(play_ivy_settings_template)
-      result = ERB.new(template).result(binding)
-      run <<-E
-        ( test -d #{File.dirname(play_ivy_settings)} || mkdir -p #{File.dirname(play_ivy_settings)} ) &&
-        ( test -f #{play_ivy_settings} && mv -f #{play_ivy_settings} #{play_ivy_settings}.orig; true );
-      E
-      put result, tempfile
-      run "diff #{play_ivy_settings} #{tempfile} || mv -f #{tempfile} #{play_ivy_settings}"
-    end
+  task :setup_locally do
+    transaction {
+      setup_ivy_locally if fetch(:play_setup_ivy_locally, false)
+      install_locally
+    }
+  end
 
-    _cset :play_ivy_settings_local, File.join(ENV['HOME'], '.ivy2', 'ivysettings.xml')
-    task :setup_ivy_locally, :except => { :no_release => true } do
-      template = File.read(play_ivy_settings_template)
-      result = ERB.new(template).result(binding)
-      run_locally(<<-E)
-        ( test -d #{File.dirname(play_ivy_settings_local)} || mkdir -p #{File.dirname(play_ivy_settings_local)} ) &&
-        ( test -f #{play_ivy_settings_local} && mv -f #{play_ivy_settings_local} #{play_ivy_settings_local}.orig; true );
-      E
-      File.open(play_ivy_settings_local, 'w') { |fp| fp.write(result) }
-    end
+  _cset :play_ivy_settings_template, File.join(File.dirname(__FILE__), 'templates', 'ivysettings.erb')
+  _cset :play_ivy_settings do
+    File.join(capture('echo $HOME').chomp, '.ivy2', 'ivysettings.xml')
+  end
+  task :setup_ivy, :roles => :app, :except => { :no_release => true } do
+    tempfile = File.join('/tmp', File.basename(play_ivy_settings))
+    on_rollback {
+      run "rm -f #{tempfile}"
+    }
+    template = File.read(play_ivy_settings_template)
+    result = ERB.new(template).result(binding)
+    run(<<-EOS)
+      ( test -d #{File.dirname(play_ivy_settings)} || mkdir -p #{File.dirname(play_ivy_settings)} ) &&
+      ( test -f #{play_ivy_settings} && mv -f #{play_ivy_settings} #{play_ivy_settings}.orig; true );
+    EOS
+    put result, tempfile
+    run "diff #{play_ivy_settings} #{tempfile} || mv -f #{tempfile} #{play_ivy_settings}"
+  end
 
-    task :install_play, :roles => :app, :except => { :no_release => true } do
-      temp_zip = File.join('/tmp', File.basename(play_zip_file))
-      temp_dir = File.join('/tmp', File.basename(play_zip_file, '.zip'))
-      on_rollback {
-        files = [ play_path, temp_zip, temp_dir ]
-        files << play_zip_file unless play_preserve_zip
-        run "#{try_sudo} rm -rf #{files.join(' ')}"
-      }
-      run "#{try_sudo} rm -f #{play_zip_file}" unless play_preserve_zip
+  _cset :play_ivy_settings_local, File.join(ENV['HOME'], '.ivy2', 'ivysettings.xml')
+  task :setup_ivy_locally, :except => { :no_release => true } do
+    template = File.read(play_ivy_settings_template)
+    result = ERB.new(template).result(binding)
+    run_locally(<<-EOS)
+      ( test -d #{File.dirname(play_ivy_settings_local)} || mkdir -p #{File.dirname(play_ivy_settings_local)} ) &&
+      ( test -f #{play_ivy_settings_local} && mv -f #{play_ivy_settings_local} #{play_ivy_settings_local}.orig; true );
+    EOS
+    File.open(play_ivy_settings_local, 'w') { |fp| fp.write(result) }
+  end
 
-      dirs = [ File.dirname(play_zip_file), File.dirname(play_path) ].uniq()
-      run <<-E
-        if ! test -x #{play_bin}; then
-          mkdir -p #{dirs.join(' ')} &&
-          ( test -f #{play_zip_file} || ( wget --no-verbose -O #{temp_zip} #{play_zip_url} && #{try_sudo} mv -f #{temp_zip} #{play_zip_file}; true ) ) &&
-          ( test -d #{play_path} || ( unzip -q #{play_zip_file} -d #{File.dirname(temp_dir)} && #{try_sudo} mv -f #{temp_dir} #{play_path}; true ) ) &&
-          test -x #{play_bin};
-        fi;
-      E
-      run "#{try_sudo} rm -f #{play_zip_file}" unless play_preserve_zip
-    end
+  task :install, :roles => :app, :except => { :no_release => true } do
+    temp_zip = File.join('/tmp', File.basename(play_zip_file))
+    temp_dir = File.join('/tmp', File.basename(play_zip_file, '.zip'))
+    on_rollback {
+      files = [ play_path, temp_zip, temp_dir ]
+      files << play_zip_file unless play_preserve_zip
+      run "#{try_sudo} rm -rf #{files.join(' ')}"
+    }
+    run "#{try_sudo} rm -f #{play_zip_file}" unless play_preserve_zip
 
-    task :install_play_locally, :except => { :no_release => true } do # TODO: make install_play and install_play_locally together
-      on_rollback {
-        files = [ play_path_local, play_zip_file_local ]
-        run_locally("rm -rf #{files.join(' ')}")
-      }
-      dirs = [ File.dirname(play_zip_file_local), File.dirname(play_path_local) ].uniq()
-      run_locally(<<-E)
-        if ! test -x #{play_bin_local}; then
-          mkdir -p #{dirs.join(' ')} &&
-          ( test -f #{play_zip_file_local} || ( wget --no-verbose -O #{play_zip_file_local} #{play_zip_url} ) ) &&
-          ( test -d #{play_path_local} || unzip -q #{play_zip_file_local} -d #{File.dirname(play_path_local)} ) &&
-          test -x #{play_bin_local};
-        fi;
-      E
-    end
+    dirs = [ File.dirname(play_zip_file), File.dirname(play_path) ].uniq()
+    run(<<-EOS)
+      if ! test -x #{play_bin}; then
+        mkdir -p #{dirs.join(' ')} &&
+        ( test -f #{play_zip_file} || ( wget --no-verbose -O #{temp_zip} #{play_zip_url} && #{try_sudo} mv -f #{temp_zip} #{play_zip_file}; true ) ) &&
+        ( test -d #{play_path} || ( unzip -q #{play_zip_file} -d #{File.dirname(temp_dir)} && #{try_sudo} mv -f #{temp_dir} #{play_path}; true ) ) &&
+        test -x #{play_bin};
+      fi;
+    EOS
+    run "#{try_sudo} rm -f #{play_zip_file}" unless play_preserve_zip
+  end
+
+  task :install_locally, :except => { :no_release => true } do
+    on_rollback {
+      files = [ play_path_local, play_zip_file_local ]
+      run_locally("rm -rf #{files.join(' ')}")
+    }
+    dirs = [ File.dirname(play_zip_file_local), File.dirname(play_path_local) ].uniq()
+    run_locally(<<-EOS)
+      if ! test -x #{play_bin_local}; then
+        mkdir -p #{dirs.join(' ')} &&
+        ( test -f #{play_zip_file_local} || ( wget --no-verbose -O #{play_zip_file_local} #{play_zip_url} ) ) &&
+        ( test -d #{play_path_local} || unzip -q #{play_zip_file_local} -d #{File.dirname(play_path_local)} ) &&
+        test -x #{play_bin_local};
+      fi;
+    EOS
   end
 
   namespace :daemonize do
@@ -317,21 +319,21 @@ namespace :play do
       run "#{try_sudo} chmod g+w #{play_project_path}/tmp" if fetch(:group_writable, true)
     end
 
-    transaction {
-      if play_use_precompile
-        if play_precompile_locally
-          setup.setup_ivy_locally if fetch(:play_setup_ivy_locally, false)
-          setup.install_play_locally
+    if play_use_precompile
+      if play_precompile_locally
+        setup_locally
+        transaction {
           dependencies_locally
           precompile_locally
-        else
-          dependencies
-          precompile
-        end
+          upload_locally
+        }
       else
         dependencies
+        precompile
       end
-    }
+    else
+      dependencies
+    end
   end
 
   task :dependencies, :roles => :app, :except => { :no_release => true } do
@@ -339,15 +341,11 @@ namespace :play do
   end
 
   task :dependencies_locally, :roles => :app, :except => { :no_release => true } do
-    abort("execution failure") unless system("cd #{play_project_path_local} && #{play_cmd_local} #{play_subcmd_dependencies}")
-    run "mkdir -p #{play_dependencies_path_map.keys.join(' ')}"
-    find_servers_for_task(current_task).each { |server|
-      cmds = play_dependencies_path_map.map { |dst, src|
-        "rsync -lrt --chmod=u+rwX,go+rX #{src}/ #{user}@#{server.host}:#{dst}/"
-      }
-      run_locally(cmds.join(' && '))
-    }
-    run "chmod -R g+w #{play_dependencies_path_map.keys.join(' ')}" if fetch(:group_writable, true)
+    if dry_run
+      logger.info("resolving play dependencies locally: #{play_project_path_local}")
+    else
+      abort("error on resolving play dependencies.") unless system("cd #{play_project_path_local} && #{play_cmd_local} #{play_subcmd_dependencies}")
+    end
   end
 
   task :precompile, :roles => :app, :except => { :no_release => true } do
@@ -358,12 +356,22 @@ namespace :play do
     on_rollback {
       run_locally("cd #{play_project_path_local} && #{play_cmd_local} clean")
     }
-    abort("execution failure") unless system("cd #{play_project_path_local} && #{play_cmd_local} #{play_subcmd_precompile}")
-    run "mkdir -p #{play_target_path}"
-    find_servers_for_task(current_task).each { |server|
-      run_locally("rsync -lrt --chmod=u+rwX,go+rX #{play_target_path_local}/ #{user}@#{server.host}:#{play_target_path}/")
+    if dry_run
+      logger.info("compiling play application locally: #{play_project_path_local}")
+    else
+      abort("error on resolving play dependencies.") unless system("cd #{play_project_path_local} && #{play_cmd_local} #{play_subcmd_precompile}")
+    end
+  end
+
+  task :upload_locally, :roles => :app, :except => { :no_release => true } do
+    map = play_dependencies_path_map.merge(play_target_path => play_target_path_local)
+    run "mkdir -p #{map.keys.join(' ')}"
+    map.map { |dst, src|
+      run_locally "cd #{File.dirname(src)} && tar chzf #{src}.tar.gz #{File.basename(src)}" unless dry_run
+      upload "#{src}.tar.gz", "#{dst}.tar.gz"
+      run "cd #{File.dirname(dst)} && tar xzf #{dst}.tar.gz && rm #{dst}.tar.gz"
     }
-    run "chmod -R g+w #{play_target_path}" if fetch(:group_writable, true)
+    run "chmod -R g+w #{map.keys.join(' ')}" if fetch(:group_writable, true)
   end
 
   desc "start play service"
